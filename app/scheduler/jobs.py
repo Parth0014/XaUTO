@@ -27,10 +27,14 @@ def start_scheduler():
 
     if not scheduler.get_jobs():
 
+        scrape_interval_minutes = int(
+            os.getenv("X_SCRAPE_INTERVAL_MINUTES", "120")
+        )
+
         scheduler.add_job(
             scrape_x_trends,
             "interval",
-            minutes=30
+            minutes=scrape_interval_minutes
         )
 
         scheduler.add_job(

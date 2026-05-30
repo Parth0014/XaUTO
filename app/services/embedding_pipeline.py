@@ -62,7 +62,11 @@ def embed_and_store_posts(db, posts: Iterable[dict]) -> int:
         return 0
 
     texts = [post.get("normalized_content") for post in new_posts]
-    vectors = embed_texts(texts)
+    try:
+        vectors = embed_texts(texts)
+    except Exception as exc:
+        logger.warning("Embedding generation failed: %s", exc)
+        raise RuntimeError(f"Embedding generation failed: {exc}") from exc
 
     items = []
     for post, vector in zip(new_posts, vectors):
@@ -72,27 +76,36 @@ def embed_and_store_posts(db, posts: Iterable[dict]) -> int:
             "payload": _build_payload(post),
         })
 
-    upsert_embeddings(items)
+    try:
+        upsert_embeddings(items)
+    except Exception as exc:
+        logger.warning("Qdrant upsert failed: %s", exc)
+        raise
 
+    inserted = 0
     for post, vector in zip(new_posts, vectors):
-        db.embedding_records.insert_one({
-            "scraped_post_id": post.get("_id"),
-            "vector_id": post.get("content_hash"),
-            "model": "default",
-            "dims": len(vector),
-            "created_at": post.get("created_at"),
-        })
+        try:
+            db.embedding_records.insert_one({
+                "scraped_post_id": post.get("_id"),
+                "vector_id": post.get("content_hash"),
+                "model": "default",
+                "dims": len(vector),
+                "created_at": post.get("created_at"),
+            })
 
-        db.scraped_posts.update_one(
-            {"_id": post.get("_id")},
-            {"$set": {
-                "normalized_content": post.get("normalized_content"),
-                "content_hash": post.get("content_hash"),
-                "language": post.get("language"),
-            }}
-        )
+            db.scraped_posts.update_one(
+                {"_id": post.get("_id")},
+                {"$set": {
+                    "normalized_content": post.get("normalized_content"),
+                    "content_hash": post.get("content_hash"),
+                    "language": post.get("language"),
+                }}
+            )
+            inserted += 1
+        except Exception as exc:
+            logger.warning("Embedding record write failed: %s", exc)
 
-    return len(new_posts)
+    return inserted
 
 
 def backfill_embeddings(db, limit: int = 200) -> int:

@@ -144,8 +144,9 @@ This repo ships with a Render blueprint and a Vercel config so you can deploy im
 - `x-ai-sys-worker` (background jobs)
 
 3. Set the secret env vars in Render for both services (DB + GROQ + Qdrant + X API). The blueprint marks them as `sync: false`.
-4. For the web service, keep `ENABLE_SCHEDULER=false`.
-5. For the worker service, keep `ENABLE_SCHEDULER=true`.
+4. Configure `X_SEARCH_TOPICS`, `X_SEARCH_MAX_RESULTS`, and `X_SCRAPE_INTERVAL_MINUTES` to match your free-tier limits.
+5. For the web service, keep `ENABLE_SCHEDULER=false`.
+6. For the worker service, keep `ENABLE_SCHEDULER=true`.
 
 Required secrets:
 

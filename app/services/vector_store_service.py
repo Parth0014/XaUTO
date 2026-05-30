@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from typing import Iterable
 
@@ -8,11 +9,14 @@ from qdrant_client.http import models as qdrant_models
 
 
 _COLLECTION = os.getenv("QDRANT_COLLECTION", "scraped_posts")
+logger = logging.getLogger("uvicorn.error")
 
 
 def _get_client() -> QdrantClient:
-    url = os.getenv("QDRANT_URL", "http://localhost:6333")
-    api_key = os.getenv("QDRANT_API_KEY")
+    url = os.getenv("QDRANT_URL", "http://localhost:6333").strip()
+    if not url:
+        raise RuntimeError("QDRANT_URL is not configured")
+    api_key = os.getenv("QDRANT_API_KEY") or None
     return QdrantClient(url=url, api_key=api_key)
 
 
@@ -27,16 +31,19 @@ def ensure_collection(vector_size: int) -> None:
                 f"Qdrant collection size mismatch: {existing_size} != {vector_size}."
             )
         return
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Qdrant collection check failed: %s", exc)
 
-    client.recreate_collection(
-        collection_name=_COLLECTION,
-        vectors_config=qdrant_models.VectorParams(
-            size=vector_size,
-            distance=qdrant_models.Distance.COSINE,
-        ),
-    )
+    try:
+        client.recreate_collection(
+            collection_name=_COLLECTION,
+            vectors_config=qdrant_models.VectorParams(
+                size=vector_size,
+                distance=qdrant_models.Distance.COSINE,
+            ),
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Qdrant collection create failed: {exc}") from exc
 
 
 def upsert_embeddings(items: Iterable[dict]) -> None:
@@ -46,7 +53,10 @@ def upsert_embeddings(items: Iterable[dict]) -> None:
 
     vectors = [item["vector"] for item in items]
     vector_size = len(vectors[0])
-    ensure_collection(vector_size)
+    try:
+        ensure_collection(vector_size)
+    except Exception as exc:
+        raise RuntimeError(f"Qdrant ensure collection failed: {exc}") from exc
 
     points = []
     for item in items:
@@ -58,18 +68,24 @@ def upsert_embeddings(items: Iterable[dict]) -> None:
         points.append(point)
 
     client = _get_client()
-    client.upsert(collection_name=_COLLECTION, points=points)
+    try:
+        client.upsert(collection_name=_COLLECTION, points=points)
+    except Exception as exc:
+        raise RuntimeError(f"Qdrant upsert failed: {exc}") from exc
 
 
 def retrieve_vector(vector_id: str):
     client = _get_client()
-    result = client.retrieve(
-        collection_name=_COLLECTION,
-        ids=[vector_id],
-        with_vectors=True,
-        with_payload=True,
-    )
-    return result[0] if result else None
+    try:
+        result = client.retrieve(
+            collection_name=_COLLECTION,
+            ids=[vector_id],
+            with_vectors=True,
+            with_payload=True,
+        )
+        return result[0] if result else None
+    except Exception as exc:
+        raise RuntimeError(f"Qdrant retrieve failed: {exc}") from exc
 
 
 def search_vectors(query_vector: list[float], top_k: int, filters: dict | None = None):
@@ -116,14 +132,17 @@ def search_vectors(query_vector: list[float], top_k: int, filters: dict | None =
 
     query_filter = qdrant_models.Filter(must=must_conditions) if must_conditions else None
 
-    return client.search(
-        collection_name=_COLLECTION,
-        query_vector=query_vector,
-        limit=top_k,
-        query_filter=query_filter,
-        with_payload=True,
-        with_vectors=False,
-    )
+    try:
+        return client.search(
+            collection_name=_COLLECTION,
+            query_vector=query_vector,
+            limit=top_k,
+            query_filter=query_filter,
+            with_payload=True,
+            with_vectors=False,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Qdrant search failed: {exc}") from exc
 
 
 def scroll_vectors(filters: dict | None = None, limit: int = 1000):
@@ -147,14 +166,17 @@ def scroll_vectors(filters: dict | None = None, limit: int = 1000):
     next_offset = None
 
     while True:
-        points, next_offset = client.scroll(
-            collection_name=_COLLECTION,
-            scroll_filter=query_filter,
-            with_vectors=True,
-            with_payload=True,
-            limit=limit,
-            offset=next_offset,
-        )
+        try:
+            points, next_offset = client.scroll(
+                collection_name=_COLLECTION,
+                scroll_filter=query_filter,
+                with_vectors=True,
+                with_payload=True,
+                limit=limit,
+                offset=next_offset,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Qdrant scroll failed: {exc}") from exc
         results.extend(points)
         if next_offset is None:
             break

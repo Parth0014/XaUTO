@@ -3,13 +3,13 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
-from fastapi.responses import Response
 
 from app.database import get_db_client, init_indexes
 from app.routes.analytics import router as analytics_router
 from app.routes.embeddings import router as embeddings_router
 from app.routes.generator import router as generator_router
 from app.routes.maintenance import router as maintenance_router
+from app.routes.pipeline import router as pipeline_router
 from app.routes.posting import router as posting_router
 from app.routes.retrieval import router as retrieval_router
 from app.routes.scraper import router as scraper_router
@@ -48,6 +48,7 @@ app.include_router(scraper_router)
 app.include_router(analytics_router)
 app.include_router(embeddings_router)
 app.include_router(generator_router)
+app.include_router(pipeline_router)
 app.include_router(posting_router)
 app.include_router(retrieval_router)
 app.include_router(maintenance_router)
@@ -136,12 +137,6 @@ def home():
 
     </html>
     """
-
-
-@app.get("/.well-known/appspecific/com.chrome.devtools.json")
-def chrome_devtools_probe():
-
-    return Response(status_code=204)
 
 
 @app.get("/healthz")

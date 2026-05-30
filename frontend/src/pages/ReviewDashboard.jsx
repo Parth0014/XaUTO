@@ -108,6 +108,7 @@ export default function ReviewDashboard() {
   const [actionMessage, setActionMessage] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [isScraping, setIsScraping] = useState(false);
+  const [isRunningPipeline, setIsRunningPipeline] = useState(false);
   const [batchCount, setBatchCount] = useState(1);
 
   async function fetchAnalytics() {
@@ -203,11 +204,8 @@ export default function ReviewDashboard() {
       setIsScraping(true);
       setError("");
       setActionMessage("");
-      const chromeResult = await apiRequest("/browser/chrome-debug");
       const result = await apiRequest("/scrape/x");
-      setActionMessage(
-        `${chromeResult.message ?? "Chrome remote debugging ready."} ${result.message ?? "X scraping started"}`,
-      );
+      setActionMessage(result.message ?? "X scraping started");
       await fetchScrapeState();
     } catch (requestError) {
       setError(
@@ -218,6 +216,31 @@ export default function ReviewDashboard() {
     } finally {
       setIsScraping(false);
       await Promise.all([fetchAnalytics(), fetchScrapeState()]);
+    }
+  }
+
+  async function runPipeline() {
+    try {
+      setIsRunningPipeline(true);
+      setError("");
+      setActionMessage("");
+      const result = await apiRequest("/pipeline/run", { method: "POST" });
+      const posted = Number(result?.posting?.posted ?? 0);
+      const failed = Array.isArray(result?.posting?.failed)
+        ? result.posting.failed.length
+        : 0;
+      setActionMessage(
+        `Pipeline complete: embedded ${result?.embedded ?? 0}, scored ${result?.scoring?.scored ?? 0}, posted ${posted}, failed ${failed}.`,
+      );
+      await Promise.all([fetchAnalytics(), fetchScrapeState()]);
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Failed to run the full pipeline",
+      );
+    } finally {
+      setIsRunningPipeline(false);
     }
   }
 
@@ -258,9 +281,9 @@ export default function ReviewDashboard() {
       detail: `State: ${scrapeState.state}`,
     },
     {
-      label: "Chrome/CDP",
-      value: scrapeState.chrome ?? "unknown",
-      detail: "Remote debugging on port 9222",
+      label: "Source",
+      value: "X API",
+      detail: "Recent search via OAuth 1.0a",
     },
     {
       label: "Latest capture",
@@ -286,9 +309,9 @@ export default function ReviewDashboard() {
           <div className="eyebrow">X AI Operations</div>
           <h1>Live scraping, generation, and analytics in one place.</h1>
           <p>
-            Start Chrome debug, watch scraping progress in real time, generate
-            posts from the latest data, and monitor the system as it runs
-            autonomously.
+            Run the end-to-end pipeline, watch scraping progress in real time,
+            generate posts from the latest data, and monitor the system as it
+            runs autonomously.
           </p>
           <div className="hero-metrics">
             <div>
@@ -315,33 +338,18 @@ export default function ReviewDashboard() {
             {isScraping ? "Starting scraper..." : "Start scraper"}
           </button>
           <button
+            className="button button-primary"
+            onClick={runPipeline}
+            disabled={isRunningPipeline}
+          >
+            {isRunningPipeline ? "Running pipeline..." : "Run full pipeline"}
+          </button>
+          <button
             className="button button-secondary"
             onClick={generatePost}
             disabled={isGenerating}
           >
             {isGenerating ? "Generating..." : `Generate ${topic}`}
-          </button>
-          <button
-            className="button button-secondary"
-            onClick={async () => {
-              try {
-                setError("");
-                setActionMessage("");
-                const result = await apiRequest("/browser/chrome-debug");
-                setActionMessage(
-                  result.message ?? "Chrome remote debugging ready.",
-                );
-                await fetchScrapeState();
-              } catch (requestError) {
-                setError(
-                  requestError instanceof Error
-                    ? requestError.message
-                    : "Failed to start Chrome debug mode",
-                );
-              }
-            }}
-          >
-            Open Chrome debug
           </button>
           <button className="button button-ghost" onClick={fetchScrapeState}>
             Refresh live status
@@ -406,8 +414,8 @@ export default function ReviewDashboard() {
               <strong>{scrapeState.seen ?? 0}</strong>
             </div>
             <div className="live-summary-card">
-              <span>Chrome/CDP</span>
-              <strong>{scrapeState.chrome ?? "unknown"}</strong>
+              <span>Source</span>
+              <strong>X API</strong>
             </div>
           </div>
 

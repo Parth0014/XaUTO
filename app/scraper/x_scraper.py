@@ -1,324 +1,251 @@
-import re
+import os
 import hashlib
-import time
 from datetime import datetime, timezone
 
-from playwright.sync_api import sync_playwright
+import requests
+from requests_oauthlib import OAuth1
 
 from app.database import get_db_client
 from app.services.scrape_progress import update_scrape_progress
-from app.services.text_cleaner import sanitize_reference_text, normalize_content, detect_language_simple
-from app.services.nlp_processor import (
-    detect_topic,
-    analyze_sentiments
+from app.services.text_cleaner import (
+    sanitize_reference_text,
+    normalize_content,
+    detect_language_simple,
 )
+from app.services.nlp_processor import detect_topic, analyze_sentiments
 from app.services.embedding_pipeline import embed_and_store_posts
 
-
-def parse_metric(value):
-
-    value = value.strip().upper()
-
-    try:
-
-        if "K" in value:
-            return int(float(value.replace("K", "")) * 1000)
-
-        elif "M" in value:
-            return int(float(value.replace("M", "")) * 1000000)
-
-        return int(value)
-
-    except:
-        return 0
-
-
-def clean_text(text):
-
-    text = re.sub(r"\s+", " ", text)
-
-    return text.strip()
+DEFAULT_TOPICS = [
+    "programming",
+    "ai",
+    "devtools",
+    "webdev",
+    "javascript",
+    "python",
+    "startup",
+]
 
 
 def sanitize_content(text: str) -> str:
     return sanitize_reference_text(text)
 
 
+def _get_oauth() -> OAuth1:
+    api_key = os.getenv("X_API_KEY")
+    api_secret = os.getenv("X_API_SECRET")
+    access_token = os.getenv("X_ACCESS_TOKEN")
+    access_secret = os.getenv("X_ACCESS_TOKEN_SECRET")
+
+    if not all([api_key, api_secret, access_token, access_secret]):
+        raise RuntimeError("X API credentials are not configured")
+
+    return OAuth1(api_key, api_secret, access_token, access_secret)
+
+
+def _build_query() -> str:
+    explicit = os.getenv("X_SEARCH_QUERY", "").strip()
+    if explicit:
+        return explicit
+
+    topics_env = os.getenv("X_SEARCH_TOPICS", "").strip()
+    topics = [
+        topic.strip()
+        for topic in topics_env.split(",")
+        if topic.strip()
+    ]
+    if not topics:
+        topics = list(DEFAULT_TOPICS)
+
+    formatted = []
+    for topic in topics:
+        if " " in topic:
+            formatted.append(f'"{topic}"')
+        else:
+            formatted.append(topic)
+
+    topic_query = " OR ".join(formatted)
+    return f"({topic_query}) lang:en -is:retweet -is:reply"
+
+
+def _fetch_recent_tweets(max_results: int) -> dict:
+    url = "https://api.x.com/2/tweets/search/recent"
+    params = {
+        "query": _build_query(),
+        "max_results": max_results,
+        "tweet.fields": "created_at,lang,public_metrics,author_id",
+        "expansions": "author_id",
+        "user.fields": "name,username",
+    }
+
+    response = requests.get(url, params=params, auth=_get_oauth(), timeout=30)
+    if not response.ok:
+        raise RuntimeError(
+            f"X API error {response.status_code}: {response.text}"
+        )
+
+    return response.json()
+
+
 def scrape_x_trends():
-
     db = get_db_client()
-    max_runtime_seconds = 30 * 60
-    delay_seconds = 15
-    scrolls_per_cycle = 3
-    deadline = time.monotonic() + max_runtime_seconds
     seen_hashes = set()
-    cycle_number = 0
-    total_inserted = 0
+    error_count = 0
 
-    with sync_playwright() as p:
+    update_scrape_progress(
+        state="running",
+        message="Fetching posts from X API recent search.",
+        chrome="not_required",
+        last_error=None,
+    )
 
-        browser = p.chromium.connect_over_cdp(
-            "http://127.0.0.1:9222"
-        )
+    max_results = int(os.getenv("X_SEARCH_MAX_RESULTS", "25"))
+    max_results = max(10, min(100, max_results))
 
-        context = browser.contexts[0]
-
-        page = context.new_page()
-
-        print("CONNECTED TO CHROME")
-
-        page.goto("https://x.com/home")
-
-        page.wait_for_selector("article")
-
+    try:
+        payload = _fetch_recent_tweets(max_results)
+    except Exception as error:
         update_scrape_progress(
-            state="running",
-            message="Connected to X and waiting for tweet cards.",
-            chrome="connected",
+            state="error",
+            message="Failed to fetch X API results.",
+            last_error=str(error),
         )
+        raise
 
-        while time.monotonic() < deadline:
-            cycle_number += 1
+    tweets = payload.get("data", [])
+    users = {
+        user["id"]: user
+        for user in payload.get("includes", {}).get("users", [])
+    }
 
-            # MULTIPLE SCROLLS
-            for _ in range(scrolls_per_cycle):
+    update_scrape_progress(
+        cycle=1,
+        seen=len(tweets),
+        message=f"Fetched {len(tweets)} tweets from X API.",
+    )
 
-                page.mouse.wheel(0, 5000)
+    scraped_candidates = []
 
-                time.sleep(2)
+    for tweet in tweets:
+        try:
+            text = sanitize_content(tweet.get("text", ""))
+            if not text:
+                continue
 
-            trend_elements = page.locator("article")
+            normalized = normalize_content(text)
+            content_hash = hashlib.sha256(
+                normalized.encode("utf-8")
+            ).hexdigest()
 
-            count = trend_elements.count()
+            tweet_id = tweet.get("id")
+            if content_hash in seen_hashes:
+                continue
 
-            print("TWEETS FOUND:", count)
+            if tweet_id:
+                existing = db.scraped_posts.find_one({
+                    "$or": [
+                        {"tweet_id": tweet_id},
+                        {"content_hash": content_hash},
+                        {"content": text},
+                    ]
+                })
+            else:
+                existing = db.scraped_posts.find_one({
+                    "$or": [
+                        {"content_hash": content_hash},
+                        {"content": text},
+                    ]
+                })
+
+            if existing:
+                seen_hashes.add(content_hash)
+                continue
+
+            metrics = tweet.get("public_metrics") or {}
+            author = users.get(tweet.get("author_id", ""), {})
+            username = author.get("name") or "Unknown"
+            handle = author.get("username")
+
+            topic = detect_topic(text)
+
+            scraped_candidates.append({
+                "tweet_id": tweet_id,
+                "content_hash": content_hash,
+                "username": username,
+                "handle": handle,
+                "tweet_content": text,
+                "normalized_content": normalized,
+                "language": tweet.get("lang") or detect_language_simple(text),
+                "replies": int(metrics.get("reply_count", 0)),
+                "reposts": int(metrics.get("retweet_count", 0)),
+                "likes": int(metrics.get("like_count", 0)),
+                "views": int(metrics.get("impression_count", 0)),
+                "topic": topic,
+            })
 
             update_scrape_progress(
-                cycle=cycle_number,
-                seen=count,
-                message=f"Cycle {cycle_number}: scanning {count} visible posts from the current X timeline.",
-                last_error=None,
+                last_author=username,
+                last_topic=topic,
+                last_content=text[:180],
+                message=f"Captured {username} in topic {topic or 'unknown'}.",
             )
-
-            scraped_candidates = []
-
-            for i in range(min(count, 20)):
-
-                try:
-
-                    trend = trend_elements.nth(i)
-
-                    raw_text = trend.inner_text()
-
-                    if not raw_text.strip():
-                        continue
-
-                    lines = [
-                        clean_text(line)
-                        for line in raw_text.split("\n")
-                        if clean_text(line)
-                    ]
-
-                    if len(lines) < 4:
-                        continue
-
-                    # BASIC STRUCTURE
-                    username = lines[0]
-
-                    handle = ""
-
-                    timestamp = ""
-
-                    tweet_content = ""
-
-                    # FIND HANDLE
-                    for line in lines:
-
-                        if line.startswith("@"):
-                            handle = line
-
-                        elif re.match(r"^\d+[smhdw]$", line):
-                            timestamp = line
-
-                    # REMOVE METRICS
-                    filtered_lines = []
-
-                    for line in lines:
-
-                        if line == username:
-                            continue
-
-                        if line == handle:
-                            continue
-
-                        if line == timestamp:
-                            continue
-
-                        if re.match(r"^[\d\.]+[KMB]?$", line):
-                            continue
-
-                        filtered_lines.append(line)
-
-                    # CONTENT
-                    if filtered_lines:
-                        tweet_content = " ".join(filtered_lines)
-
-                    tweet_content = clean_text(tweet_content)
-
-                    # METRICS
-                    replies = 0
-                    reposts = 0
-                    likes = 0
-                    views = 0
-
-                    metric_candidates = [
-                        line for line in lines
-                        if re.match(r"^[\d\.]+[KMB]?$", line)
-                    ]
-
-                    if len(metric_candidates) >= 4:
-
-                        replies = parse_metric(metric_candidates[-4])
-
-                        reposts = parse_metric(metric_candidates[-3])
-
-                        likes = parse_metric(metric_candidates[-2])
-
-                        views = parse_metric(metric_candidates[-1])
-
-                    # SKIP EMPTY
-                    if not tweet_content:
-                        continue
-
-                    # sanitize content to remove UI noise before topic detection and storage
-                    tweet_content = sanitize_content(tweet_content)
-
-                    if not tweet_content:
-                        continue
-
-                    topic = detect_topic(tweet_content)
-
-                    # DUPLICATE CHECK
-                    normalized = normalize_content(tweet_content)
-
-                    content_hash = hashlib.sha256(
-                        normalized.encode("utf-8")
-                    ).hexdigest()
-
-                    if content_hash in seen_hashes:
-                        continue
-
-                        existing = db.scraped_posts.find_one({
-                            "$or": [
-                                {"content_hash": content_hash},
-                                {"content": tweet_content},
-                            ]
-                        })
-
-                        if existing:
-                            print("DUPLICATE SKIPPED")
-                            seen_hashes.add(content_hash)
-                            continue
-
-                        print("\n====================")
-                        print("USERNAME:", username)
-                        print("HANDLE:", handle)
-                        print("TIME:", timestamp)
-                        print("CONTENT:", tweet_content)
-                        print("REPLIES:", replies)
-                        print("REPOSTS:", reposts)
-                        print("LIKES:", likes)
-                        print("VIEWS:", views)
-                        print("====================\n")
-
-                        scraped_candidates.append({
-                            "content_hash": content_hash,
-                            "username": username,
-                            "tweet_content": tweet_content,
-                            "normalized_content": normalized,
-                            "language": detect_language_simple(tweet_content),
-                            "replies": replies,
-                            "reposts": reposts,
-                            "likes": likes,
-                            "views": views,
-                            "topic": topic
-                        })
-
-                    update_scrape_progress(
-                        last_author=username,
-                        last_topic=topic,
-                        last_content=tweet_content[:180],
-                        message=f"Captured {username} in topic {topic or 'unknown'}.",
-                    )
-
-                except Exception as e:
-
-                    print("ERROR:", e)
-                    update_scrape_progress(
-                        last_error=str(e),
-                        message="A tweet card could not be parsed, continuing.",
-                    )
-
-            sentiments = analyze_sentiments(
-                [candidate["tweet_content"] for candidate in scraped_candidates]
+        except Exception as error:
+            error_count += 1
+            update_scrape_progress(
+                last_error=str(error),
+                message="Failed to process an X API tweet, continuing.",
             )
+            continue
 
-            inserted_count = 0
+    sentiments = analyze_sentiments(
+        [candidate["tweet_content"] for candidate in scraped_candidates]
+    )
 
-            new_posts = []
+    new_posts = []
+    for candidate, sentiment in zip(scraped_candidates, sentiments):
+        post = {
+            "platform": "x",
+            "tweet_id": candidate["tweet_id"],
+            "author": candidate["username"],
+            "handle": candidate["handle"],
+            "content": candidate["tweet_content"],
+            "normalized_content": candidate["normalized_content"],
+            "content_hash": candidate["content_hash"],
+            "language": candidate["language"],
+            "likes": candidate["likes"],
+            "replies": candidate["replies"],
+            "reposts": candidate["reposts"],
+            "views": candidate["views"],
+            "topic": candidate["topic"],
+            "sentiment": sentiment,
+            "created_at": datetime.now(timezone.utc),
+        }
 
-            for candidate, sentiment in zip(scraped_candidates, sentiments):
+        new_posts.append(post)
+        seen_hashes.add(candidate["content_hash"])
 
-                post = {
-                    "platform": "x",
-                    "author": candidate["username"],
-                    "content": candidate["tweet_content"],
-                    "normalized_content": candidate["normalized_content"],
-                    "content_hash": candidate["content_hash"],
-                    "language": candidate["language"],
-                    "likes": candidate["likes"],
-                    "replies": candidate["replies"],
-                    "reposts": candidate["reposts"],
-                    "views": candidate["views"],
-                    "topic": candidate["topic"],
-                    "sentiment": sentiment,
-                    "created_at": datetime.now(timezone.utc),
-                }
+    inserted_count = 0
+    if new_posts:
+        result = db.scraped_posts.insert_many(new_posts)
+        for post, oid in zip(new_posts, result.inserted_ids):
+            post["_id"] = oid
+        inserted_count = len(result.inserted_ids)
 
-                new_posts.append(post)
-                seen_hashes.add(candidate["content_hash"])
-                inserted_count += 1
-                total_inserted += 1
+    if new_posts:
+        try:
+            embed_and_store_posts(db, new_posts)
+        except Exception as error:
+            update_scrape_progress(
+                last_error=str(error),
+                message="Embedding failed. Check Qdrant or embedding config.",
+            )
+            print("EMBEDDING ERROR:", error)
+            error_count += 1
 
-                update_scrape_progress(
-                    inserted=total_inserted,
-                    message=f"Inserted {total_inserted} posts so far. Latest cycle added {inserted_count}.",
-                    last_author=candidate["username"],
-                    last_topic=candidate["topic"],
-                    last_content=candidate["tweet_content"][:180],
-                )
-
-                if new_posts:
-                    result = db.scraped_posts.insert_many(new_posts)
-                    for post, oid in zip(new_posts, result.inserted_ids):
-                        post["_id"] = oid
-
-                try:
-                    embed_and_store_posts(db, new_posts)
-                except Exception as error:
-                    print("EMBEDDING ERROR:", error)
-
-                print("CYCLE COMPLETE. INSERTED:", inserted_count)
-
-                update_scrape_progress(
-                    state="running",
-                    message=f"Cycle {cycle_number} complete with {inserted_count} new posts.",
-                    inserted=total_inserted,
-                )
-
-                if time.monotonic() >= deadline:
-                    break
-
-                time.sleep(delay_seconds)
-
-        print("SCRAPING COMPLETE")
+    update_scrape_progress(
+        state="idle",
+        message=(
+            f"X API scrape complete with {inserted_count} new posts"
+            f" and {error_count} errors."
+        ),
+        inserted=inserted_count,
+    )

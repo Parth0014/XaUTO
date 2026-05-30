@@ -2,7 +2,6 @@ import threading
 
 from fastapi import APIRouter
 
-from app.services.chrome_debug import ensure_chrome_debug_browser
 from app.services.scrape_progress import (
     fail_scrape_progress,
     finish_scrape_progress,
@@ -17,9 +16,7 @@ router = APIRouter()
 
 @router.get("/scrape/x")
 def scrape_x():
-
-    chrome_result = ensure_chrome_debug_browser()
-    start_scrape_progress(chrome_result["message"])
+    start_scrape_progress("X API scrape started.")
 
     def run_scraper():
         try:
@@ -35,14 +32,7 @@ def scrape_x():
     return {
         "status": "success",
         "message": "X scraping started",
-        "chrome": chrome_result,
     }
-
-
-@router.get("/browser/chrome-debug")
-def start_chrome_debug():
-
-    return ensure_chrome_debug_browser()
 
 
 @router.get("/scrape/status")

@@ -26,6 +26,7 @@ def get_db_client():
 
 def init_indexes(db):
     db.scraped_posts.create_index("content_hash", unique=True, sparse=True)
+    db.scraped_posts.create_index("tweet_id", unique=True, sparse=True)
     db.scraped_posts.create_index([("created_at", DESCENDING)])
     db.scraped_posts.create_index([("topic", ASCENDING)])
 
