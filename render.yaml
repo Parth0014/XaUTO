@@ -1,0 +1,132 @@
+services:
+  - type: web
+    name: x-ai-sys-api
+    env: python
+    plan: starter
+    buildCommand: "pip install -r requirements.txt; python -m playwright install --with-deps chromium"
+    startCommand: "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: ENABLE_SCHEDULER
+        value: "false"
+      - key: CORS_ORIGINS
+        value: "https://YOUR_VERCEL_DOMAIN"
+      - key: MONGO_URI
+        sync: false
+      - key: MONGO_DB
+        value: "x_ai_system"
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_API_URL
+        sync: false
+      - key: GROQ_MODEL
+        value: "openai/gpt-oss-20b"
+      - key: GROQ_EMBEDDINGS_URL
+        sync: false
+      - key: GROQ_EMBEDDINGS_MODEL
+        value: "nomic-embed-text-v1.5"
+      - key: EMBEDDING_PROVIDER
+        value: "local"
+      - key: EMBEDDING_MODEL
+        value: "sentence-transformers/all-MiniLM-L6-v2"
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: QDRANT_COLLECTION
+        value: "scraped_posts"
+      - key: POST_MODE
+        value: "x_api"
+      - key: AUTOPOST_ENABLED
+        value: "false"
+      - key: POST_MIN_SCORE
+        value: "70"
+      - key: POST_MIN_INTERVAL_MINUTES
+        value: "30"
+      - key: POST_DAILY_LIMIT
+        value: "6"
+      - key: POST_MAX_PER_RUN
+        value: "1"
+      - key: CLEANUP_RETENTION_DAYS
+        value: "30"
+      - key: CLEANUP_MAX_SCRAPED_POSTS
+        value: "5000"
+      - key: CLEANUP_MAX_GENERATED_POSTS
+        value: "2000"
+      - key: CLEANUP_MAX_TREND_CLUSTERS
+        value: "2000"
+      - key: CLEANUP_MAX_ANALYTICS_EVENTS
+        value: "20000"
+      - key: X_API_KEY
+        sync: false
+      - key: X_API_SECRET
+        sync: false
+      - key: X_ACCESS_TOKEN
+        sync: false
+      - key: X_ACCESS_TOKEN_SECRET
+        sync: false
+
+  - type: worker
+    name: x-ai-sys-worker
+    env: python
+    plan: starter
+    buildCommand: "pip install -r requirements.txt; python -m playwright install --with-deps chromium"
+    startCommand: "python app/worker.py"
+    envVars:
+      - key: ENABLE_SCHEDULER
+        value: "true"
+      - key: CORS_ORIGINS
+        value: "https://YOUR_VERCEL_DOMAIN"
+      - key: MONGO_URI
+        sync: false
+      - key: MONGO_DB
+        value: "x_ai_system"
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_API_URL
+        sync: false
+      - key: GROQ_MODEL
+        value: "openai/gpt-oss-20b"
+      - key: GROQ_EMBEDDINGS_URL
+        sync: false
+      - key: GROQ_EMBEDDINGS_MODEL
+        value: "nomic-embed-text-v1.5"
+      - key: EMBEDDING_PROVIDER
+        value: "local"
+      - key: EMBEDDING_MODEL
+        value: "sentence-transformers/all-MiniLM-L6-v2"
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: QDRANT_COLLECTION
+        value: "scraped_posts"
+      - key: POST_MODE
+        value: "x_api"
+      - key: AUTOPOST_ENABLED
+        value: "false"
+      - key: POST_MIN_SCORE
+        value: "70"
+      - key: POST_MIN_INTERVAL_MINUTES
+        value: "30"
+      - key: POST_DAILY_LIMIT
+        value: "6"
+      - key: POST_MAX_PER_RUN
+        value: "1"
+      - key: CLEANUP_RETENTION_DAYS
+        value: "30"
+      - key: CLEANUP_MAX_SCRAPED_POSTS
+        value: "5000"
+      - key: CLEANUP_MAX_GENERATED_POSTS
+        value: "2000"
+      - key: CLEANUP_MAX_TREND_CLUSTERS
+        value: "2000"
+      - key: CLEANUP_MAX_ANALYTICS_EVENTS
+        value: "20000"
+      - key: X_API_KEY
+        sync: false
+      - key: X_API_SECRET
+        sync: false
+      - key: X_ACCESS_TOKEN
+        sync: false
+      - key: X_ACCESS_TOKEN_SECRET
+        sync: false

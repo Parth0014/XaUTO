@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+python-dotenv
+pymongo
+playwright
+apscheduler
+httpx
+pydantic
+numpy
+scikit-learn
+sentence-transformers
+qdrant-client
