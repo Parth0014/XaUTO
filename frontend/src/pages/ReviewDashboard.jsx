@@ -1,29 +1,22 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 
-const INITIAL_SCRAPE_STATE = {
-  state: "idle",
-  message: "Waiting to start scraping.",
-  chrome: "unknown",
-  cycle: 0,
-  inserted: 0,
-  seen: 0,
-  last_topic: null,
-  last_author: null,
-  last_content: null,
-  last_error: null,
-  started_at: null,
-  updated_at: null,
-};
+const PIPELINE_STAGE_ORDER = [
+  "scrape",
+  "generate",
+  "db",
+  "preprocess",
+  "score",
+  "post",
+  "complete",
+  "error",
+];
 
 async function apiRequest(path, options = {}) {
   const response = await fetch(`${API_BASE_URL}${path}`, {
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers ?? {}),
-    },
+    headers: { "Content-Type": "application/json", ...(options.headers ?? {}) },
     ...options,
   });
 
@@ -37,37 +30,16 @@ async function apiRequest(path, options = {}) {
       typeof payload === "string"
         ? payload
         : (payload?.detail ?? `Request failed with status ${response.status}`);
-
     throw new Error(detail);
   }
 
   return payload;
 }
 
-function normalizeCountMap(data, labelKey) {
-  if (!data || typeof data !== "object") {
-    return [];
-  }
-
-  return Object.entries(data)
-    .map(([label, count]) => ({
-      [labelKey]: label,
-      count: Number(count) || 0,
-    }))
-    .sort((left, right) => right.count - left.count);
-}
-
 function formatTimestamp(value) {
-  if (!value) {
-    return "—";
-  }
-
+  if (!value) return "—";
   const parsed = new Date(value);
-
-  if (Number.isNaN(parsed.getTime())) {
-    return "—";
-  }
-
+  if (Number.isNaN(parsed.getTime())) return "—";
   return new Intl.DateTimeFormat(undefined, {
     hour: "2-digit",
     minute: "2-digit",
@@ -77,530 +49,460 @@ function formatTimestamp(value) {
   }).format(parsed);
 }
 
-function truncateText(value, length = 140) {
-  if (!value) {
-    return "—";
-  }
-
-  return value.length > length ? `${value.slice(0, length).trim()}…` : value;
+function getEventLabel(type) {
+  const map = {
+    scrape_progress: "Scrape",
+    scoring: "Score",
+    post_feedback: "Feedback",
+    pipeline: "Pipeline",
+    request: "Request",
+  };
+  return map[type] ?? "Event";
 }
 
-function getStatusTone(state) {
-  if (state === "running") {
-    return "live";
+function getEventSummary(entry) {
+  const payload = entry?.body ?? {};
+
+  if (entry.type === "pipeline") {
+    const stage = payload.stage ? `${payload.stage}: ` : "";
+    const status = payload.status ? `${payload.status} - ` : "";
+    return `${stage}${status}${payload.message ?? "Pipeline event received."}`;
   }
 
-  if (state === "error") {
-    return "error";
+  if (entry.type === "scrape_progress") {
+    return `${payload.message ?? "Scrape progress updated."} (${payload.state ?? "unknown"}, inserted ${payload.inserted ?? 0}, seen ${payload.seen ?? 0})`;
   }
 
-  return "idle";
+  if (entry.type === "scoring") {
+    return `Post ${payload.post_id ?? "unknown"}: predicted ${payload.predicted_score ?? "n/a"}, reward ${payload.reward_score ?? "n/a"}`;
+  }
+
+  if (entry.type === "post_feedback") {
+    return `Updated engagement for ${payload.updated ?? 0} posted item${payload.updated === 1 ? "" : "s"}`;
+  }
+
+  if (entry.type === "request") {
+    return `${payload.method ?? "GET"} ${payload.path ?? "unknown path"} responded with ${payload.status_code ?? "n/a"}`;
+  }
+
+  return payload?.message ?? "Live event received.";
+}
+
+function badgeStyles(variant) {
+  if (variant === "live")
+    return { background: "rgba(34,197,94,.12)", color: "#16a34a" };
+  if (variant === "error")
+    return { background: "rgba(239,68,68,.12)", color: "#dc2626" };
+  return { background: "rgba(100,116,139,.12)", color: "#64748b" };
+}
+
+function Panel({ title, subtitle, right, children }) {
+  return (
+    <section
+      style={{
+        border: "1px solid rgba(148,163,184,.25)",
+        borderRadius: 16,
+        overflow: "hidden",
+        background: "rgba(15,23,42,.72)",
+        backdropFilter: "blur(10px)",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          gap: 16,
+          alignItems: "center",
+          padding: "14px 16px",
+          borderBottom: "1px solid rgba(148,163,184,.18)",
+        }}
+      >
+        <div>
+          <div style={{ fontWeight: 700, color: "#e2e8f0" }}>{title}</div>
+          {subtitle ? (
+            <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 2 }}>
+              {subtitle}
+            </div>
+          ) : null}
+        </div>
+        {right}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function StatusChip({ backendReady, status }) {
+  const variant =
+    status === "running" ? "live" : status === "error" ? "error" : "idle";
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "6px 10px",
+        borderRadius: 999,
+        fontSize: 12,
+        fontWeight: 600,
+        ...badgeStyles(variant),
+      }}
+    >
+      <span
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: 999,
+          background:
+            variant === "live"
+              ? "#22c55e"
+              : variant === "error"
+                ? "#ef4444"
+                : "#94a3b8",
+        }}
+      />
+      {backendReady ? "Backend ready" : "Connecting…"}
+    </span>
+  );
 }
 
 export default function ReviewDashboard() {
-  const [topic, setTopic] = useState("programming");
-  const [topPosts, setTopPosts] = useState([]);
-  const [topics, setTopics] = useState([]);
-  const [sentiment, setSentiment] = useState([]);
-  const [scrapeState, setScrapeState] = useState(INITIAL_SCRAPE_STATE);
-  const [topPostsLoading, setTopPostsLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [actionMessage, setActionMessage] = useState("");
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [isScraping, setIsScraping] = useState(false);
-  const [isRunningPipeline, setIsRunningPipeline] = useState(false);
-  const [batchCount, setBatchCount] = useState(1);
-
-  async function fetchAnalytics() {
-    try {
-      const [topPostsData, topicsData, sentimentData] = await Promise.all([
-        apiRequest("/analytics/top-posts"),
-        apiRequest("/analytics/topics"),
-        apiRequest("/analytics/sentiment"),
-      ]);
-
-      setTopPosts(Array.isArray(topPostsData) ? topPostsData : []);
-      setTopics(normalizeCountMap(topicsData, "topic"));
-      setSentiment(normalizeCountMap(sentimentData, "sentiment"));
-    } catch (requestError) {
-      setError(
-        requestError instanceof Error
-          ? requestError.message
-          : "Failed to load analytics",
-      );
-    } finally {
-      setTopPostsLoading(false);
-    }
-  }
-
-  async function fetchScrapeState() {
-    try {
-      const data = await apiRequest("/scrape/status");
-      setScrapeState((previous) => ({
-        ...previous,
-        ...data,
-      }));
-    } catch (requestError) {
-      setError(
-        requestError instanceof Error
-          ? requestError.message
-          : "Failed to load scraping status",
-      );
-    }
-  }
+  const [backendReady, setBackendReady] = useState(false);
+  const [scrapeState, setScrapeState] = useState({
+    state: "idle",
+    message: "Waiting for live events.",
+  });
+  const [logs, setLogs] = useState([]);
+  const feedRef = useRef(null);
+  const wasAtBottomRef = useRef(true);
 
   useEffect(() => {
     let mounted = true;
+    let retryTimer;
+    let intervalId;
+    let eventSource;
 
-    const loadInitialData = async () => {
-      await Promise.all([fetchAnalytics(), fetchScrapeState()]);
+    const connect = async () => {
+      try {
+        await apiRequest("/healthz");
+        if (!mounted) return;
+
+        setBackendReady(true);
+        try {
+          const data = await apiRequest("/scrape/status");
+          if (mounted) setScrapeState((prev) => ({ ...prev, ...(data ?? {}) }));
+        } catch {
+          // ignore scrape status failures during initial connect
+        }
+
+        intervalId = window.setInterval(() => {
+          apiRequest("/healthz")
+            .then(() => {
+              if (mounted) setBackendReady(true);
+            })
+            .catch(() => {
+              if (mounted) setBackendReady(false);
+            });
+        }, 10000);
+
+        eventSource = new EventSource(`${API_BASE_URL}/events/stream`);
+        eventSource.onmessage = (evt) => {
+          try {
+            const msg = JSON.parse(evt.data);
+            const entry = {
+              id: Date.now() + Math.random(),
+              type: msg?.type ?? "event",
+              body: msg?.payload ?? {},
+              ts: new Date().toISOString(),
+            };
+
+            if (entry.type === "scrape_progress") {
+              setScrapeState((prev) => ({ ...prev, ...(entry.body ?? {}) }));
+            }
+
+            setLogs((prev) => [entry, ...prev].slice(0, 200));
+          } catch {
+            // ignore malformed SSE payloads
+          }
+        };
+        eventSource.onerror = () => {
+          if (mounted) setBackendReady(false);
+        };
+      } catch {
+        if (!mounted) return;
+        setBackendReady(false);
+        retryTimer = window.setTimeout(connect, 5000);
+      }
     };
 
-    loadInitialData().catch(() => {
-      if (mounted) {
-        setError("Failed to initialize dashboard data");
-      }
-    });
-
-    const intervalId = window.setInterval(() => {
-      fetchScrapeState();
-      fetchAnalytics();
-    }, 2500);
+    connect();
 
     return () => {
       mounted = false;
+      window.clearTimeout(retryTimer);
       window.clearInterval(intervalId);
+      try {
+        eventSource?.close();
+      } catch {
+        // ignore cleanup errors
+      }
     };
   }, []);
 
-  async function generatePost() {
-    try {
-      setIsGenerating(true);
-      setError("");
-      setActionMessage("");
-      const count = Math.max(1, Math.min(11, Number(batchCount) || 1));
-      const response = await apiRequest(
-        `/generate/${encodeURIComponent(topic)}?count=${count}`,
-      );
-      const results = Array.isArray(response?.items) ? response.items : [];
+  const pipelineStages = useMemo(() => {
+    const latestByStage = new Map();
 
-      setActionMessage(
-        `Generated ${results.length} post${results.length > 1 ? "s" : ""} for ${topic}. Sent to the autonomous pipeline.`,
-      );
-      await Promise.all([fetchAnalytics(), fetchScrapeState()]);
-    } catch (requestError) {
-      setError(
-        requestError instanceof Error
-          ? requestError.message
-          : "Failed to generate a draft",
-      );
-    } finally {
-      setIsGenerating(false);
+    for (const entry of logs.filter((item) => item.type === "pipeline")) {
+      const stage = entry?.body?.stage || "unknown";
+      latestByStage.set(stage, entry);
     }
-  }
 
-  async function startScraper() {
-    try {
-      setIsScraping(true);
-      setError("");
-      setActionMessage("");
-      const result = await apiRequest("/scrape/x");
-      setActionMessage(result.message ?? "X scraping started");
-      await fetchScrapeState();
-    } catch (requestError) {
-      setError(
-        requestError instanceof Error
-          ? requestError.message
-          : "Failed to start the scraper",
-      );
-    } finally {
-      setIsScraping(false);
-      await Promise.all([fetchAnalytics(), fetchScrapeState()]);
+    return PIPELINE_STAGE_ORDER.map((stage) => {
+      const entry = latestByStage.get(stage);
+      return {
+        stage,
+        status: entry?.body?.status ?? "waiting",
+        message: entry?.body?.message ?? "Waiting for pipeline run.",
+        ts: entry?.ts ?? null,
+      };
+    });
+  }, [logs]);
+
+  const recentLogs = logs;
+
+  useEffect(() => {
+    const el = feedRef.current;
+    if (!el) return;
+    wasAtBottomRef.current =
+      el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+  });
+
+  useEffect(() => {
+    const el = feedRef.current;
+    if (el && wasAtBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
     }
-  }
-
-  async function runPipeline() {
-    try {
-      setIsRunningPipeline(true);
-      setError("");
-      setActionMessage("");
-      const result = await apiRequest("/pipeline/run", { method: "POST" });
-      const posted = Number(result?.posting?.posted ?? 0);
-      const failed = Array.isArray(result?.posting?.failed)
-        ? result.posting.failed.length
-        : 0;
-      setActionMessage(
-        `Pipeline complete: embedded ${result?.embedded ?? 0}, scored ${result?.scoring?.scored ?? 0}, posted ${posted}, failed ${failed}.`,
-      );
-      await Promise.all([fetchAnalytics(), fetchScrapeState()]);
-    } catch (requestError) {
-      setError(
-        requestError instanceof Error
-          ? requestError.message
-          : "Failed to run the full pipeline",
-      );
-    } finally {
-      setIsRunningPipeline(false);
-    }
-  }
-
-  const stats = useMemo(() => {
-    const safeTopPosts = Array.isArray(topPosts) ? topPosts : [];
-    const safeTopics = Array.isArray(topics) ? topics : [];
-    const safeSentiment = Array.isArray(sentiment) ? sentiment : [];
-
-    const totalTopPosts = safeTopPosts.length;
-    const dominantTopic = safeTopics[0]?.topic ?? "None";
-    const totalSentiment = safeSentiment.reduce(
-      (sum, entry) => sum + entry.count,
-      0,
-    );
-    const positiveShare =
-      safeSentiment.find(
-        (entry) => String(entry.sentiment).toLowerCase() === "positive",
-      )?.count ?? 0;
-
-    return {
-      latestTopic: scrapeState.last_topic ?? "None",
-      topPosts: totalTopPosts,
-      dominantTopic,
-      positiveShare: totalSentiment === 0 ? 0 : positiveShare,
-      scrapeState: scrapeState.state,
-      scrapeInserted: scrapeState.inserted ?? 0,
-      scrapeSeen: scrapeState.seen ?? 0,
-    };
-  }, [topPosts, topics, sentiment, scrapeState]);
-
-  const maxTopicCount = Math.max(...topics.map((item) => item.count), 1);
-  const maxSentimentCount = Math.max(...sentiment.map((item) => item.count), 1);
-
-  const activityItems = [
-    {
-      label: "Scrape status",
-      value: scrapeState.message,
-      detail: `State: ${scrapeState.state}`,
-    },
-    {
-      label: "Source",
-      value: "X API",
-      detail: "Recent search via OAuth 1.0a",
-    },
-    {
-      label: "Latest capture",
-      value:
-        scrapeState.last_author && scrapeState.last_topic
-          ? `${scrapeState.last_author} · ${scrapeState.last_topic}`
-          : "No post captured yet",
-      detail: truncateText(scrapeState.last_content, 110),
-    },
-    {
-      label: "Last error",
-      value: scrapeState.last_error ?? "None",
-      detail: scrapeState.last_error
-        ? "Check the scraper logs and retry the flow."
-        : "No parsing or connection errors reported.",
-    },
-  ];
+  }, [logs]);
 
   return (
-    <main className="dashboard-shell">
-      <section className="hero-panel hero-panel--wide">
-        <div className="hero-copy">
-          <div className="eyebrow">X AI Operations</div>
-          <h1>Live scraping, generation, and analytics in one place.</h1>
-          <p>
-            Run the end-to-end pipeline, watch scraping progress in real time,
-            generate posts from the latest data, and monitor the system as it
-            runs autonomously.
-          </p>
-          <div className="hero-metrics">
-            <div>
-              <span>Scrape state</span>
-              <strong>{stats.scrapeState}</strong>
-            </div>
-            <div>
-              <span>Rows inserted</span>
-              <strong>{stats.scrapeInserted}</strong>
-            </div>
-            <div>
-              <span>Visible posts scanned</span>
-              <strong>{stats.scrapeSeen}</strong>
-            </div>
-          </div>
-        </div>
-
-        <div className="hero-actions stack-actions">
-          <button
-            className="button button-primary"
-            onClick={startScraper}
-            disabled={isScraping}
+    <main
+      style={{
+        minHeight: "100vh",
+        padding: 24,
+        background:
+          "radial-gradient(circle at top, rgba(56,189,248,.12), transparent 32%), linear-gradient(180deg, #0f172a 0%, #111827 100%)",
+        color: "#e2e8f0",
+      }}
+    >
+      <div style={{ maxWidth: 1180, margin: "0 auto" }}>
+        <Panel
+          title="Pipeline monitor"
+          subtitle="Only the ordered pipeline checklist, live log feed, and readiness indicator"
+          right={
+            <StatusChip
+              backendReady={backendReady}
+              status={scrapeState.state}
+            />
+          }
+        >
+          <div
+            style={{
+              padding: 16,
+              display: "grid",
+              gap: 16,
+              gridTemplateColumns: "1.1fr .9fr",
+            }}
           >
-            {isScraping ? "Starting scraper..." : "Start scraper"}
-          </button>
-          <button
-            className="button button-primary"
-            onClick={runPipeline}
-            disabled={isRunningPipeline}
-          >
-            {isRunningPipeline ? "Running pipeline..." : "Run full pipeline"}
-          </button>
-          <button
-            className="button button-secondary"
-            onClick={generatePost}
-            disabled={isGenerating}
-          >
-            {isGenerating ? "Generating..." : `Generate ${topic}`}
-          </button>
-          <button className="button button-ghost" onClick={fetchScrapeState}>
-            Refresh live status
-          </button>
-        </div>
-      </section>
-
-      <section className="stats-grid stats-grid--compact">
-        <article className="stat-card">
-          <span>Latest topic</span>
-          <strong>{stats.latestTopic}</strong>
-        </article>
-        <article className="stat-card">
-          <span>Top posts loaded</span>
-          <strong>{stats.topPosts}</strong>
-        </article>
-        <article className="stat-card">
-          <span>Dominant topic</span>
-          <strong>{stats.dominantTopic}</strong>
-        </article>
-        <article className="stat-card">
-          <span>Positive sentiment</span>
-          <strong>{stats.positiveShare}</strong>
-        </article>
-      </section>
-
-      {actionMessage ? (
-        <div className="success-banner">{actionMessage}</div>
-      ) : null}
-
-      {error ? <div className="error-banner">{error}</div> : null}
-
-      <section className="workspace-grid">
-        <article className="panel-card live-panel">
-          <div className="panel-header panel-header--stacked">
-            <div>
-              <div className="queue-label">Live scrape monitor</div>
-              <h2>Real-time scraper telemetry</h2>
-            </div>
-            <span
-              className={`status-pill status-pill--${getStatusTone(scrapeState.state)}`}
-            >
-              {scrapeState.state === "running"
-                ? "Scraping live"
-                : scrapeState.state === "error"
-                  ? "Scrape error"
-                  : "Idle"}
-            </span>
-          </div>
-
-          <div className="live-summary-grid">
-            <div className="live-summary-card">
-              <span>Cycle</span>
-              <strong>{scrapeState.cycle ?? 0}</strong>
-            </div>
-            <div className="live-summary-card">
-              <span>Inserted this run</span>
-              <strong>{scrapeState.inserted ?? 0}</strong>
-            </div>
-            <div className="live-summary-card">
-              <span>Cards scanned</span>
-              <strong>{scrapeState.seen ?? 0}</strong>
-            </div>
-            <div className="live-summary-card">
-              <span>Source</span>
-              <strong>X API</strong>
-            </div>
-          </div>
-
-          <div className="live-detail-grid">
-            <div>
-              <span>Started</span>
-              <strong>{formatTimestamp(scrapeState.started_at)}</strong>
-            </div>
-            <div>
-              <span>Updated</span>
-              <strong>{formatTimestamp(scrapeState.updated_at)}</strong>
-            </div>
-            <div>
-              <span>Last author</span>
-              <strong>{scrapeState.last_author ?? "—"}</strong>
-            </div>
-            <div>
-              <span>Last topic</span>
-              <strong>{scrapeState.last_topic ?? "—"}</strong>
-            </div>
-          </div>
-
-          <div className="live-note">
-            <span>Current message</span>
-            <p>{scrapeState.message}</p>
-          </div>
-
-          <div className="timeline-card">
-            <div className="timeline-header">
-              <strong>Event feed</strong>
-              <span>Updates every 2.5 seconds</span>
-            </div>
-            <div className="timeline-list">
-              {activityItems.map((item) => (
-                <div className="timeline-item" key={item.label}>
-                  <div>
-                    <span>{item.label}</span>
-                    <strong>{item.value}</strong>
-                  </div>
-                  <p>{item.detail}</p>
+            <section style={{ display: "grid", gap: 12 }}>
+              <div style={{ display: "grid", gap: 10 }}>
+                <div style={{ fontSize: 12, color: "#94a3b8" }}>
+                  Ordered pipeline
                 </div>
-              ))}
-            </div>
-          </div>
-        </article>
-
-        <div className="sidebar-stack">
-          <article className="panel-card">
-            <div className="panel-header panel-header--stacked">
-              <div>
-                <div className="queue-label">Generation control</div>
-                <h2>Topic input and actions</h2>
-              </div>
-            </div>
-
-            <div className="toolbar toolbar--stacked">
-              <input
-                className="topic-input"
-                value={topic}
-                onChange={(event) => setTopic(event.target.value)}
-                placeholder="Topic, e.g. programming"
-              />
-              <div className="queue-toolbar">
-                <input
-                  className="topic-input"
-                  type="number"
-                  min="1"
-                  max="11"
-                  value={batchCount}
-                  onChange={(event) => setBatchCount(event.target.value)}
-                  placeholder="Batch count"
-                />
-                <span className="queue-hint">Max 11 per batch</span>
-              </div>
-            </div>
-
-            <p className="panel-note">
-              The dashboard polls scrape status and analytics in the background
-              while generation runs autonomously.
-            </p>
-          </article>
-
-          <article className="panel-card">
-            <div className="panel-header panel-header--stacked">
-              <div>
-                <div className="queue-label">Analytics snapshot</div>
-                <h2>Top performing posts</h2>
-              </div>
-              <span className="status-pill">Live from backend</span>
-            </div>
-
-            {topPostsLoading ? (
-              <div className="empty-state">Loading analytics...</div>
-            ) : topPosts.length === 0 ? (
-              <div className="empty-state">No analytics data yet.</div>
-            ) : (
-              <div className="mini-list">
-                {topPosts.slice(0, 4).map((post, index) => (
-                  <article
-                    className="mini-card"
-                    key={`${post.author}-${index}`}
-                  >
-                    <div className="mini-card-top">
-                      <strong>{post.author}</strong>
-                      <span>{post.topic ?? "general"}</span>
-                    </div>
-                    <p>{truncateText(post.content, 165)}</p>
-                    <div className="mini-meta">
-                      <span>Likes {post.likes}</span>
-                      <span>Views {post.views}</span>
-                      <span>{post.sentiment}</span>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            )}
-          </article>
-        </div>
-      </section>
-
-      <section className="content-grid content-grid--balanced">
-        <article className="panel-card">
-          <div className="panel-header panel-header--stacked">
-            <div>
-              <div className="queue-label">Topic distribution</div>
-              <h2>Scraped topic mix</h2>
-            </div>
-          </div>
-
-          {topics.length === 0 ? (
-            <div className="empty-state">No topic data available yet.</div>
-          ) : (
-            <div className="mini-list">
-              {topics.map((entry) => (
-                <div className="bar-row" key={entry.topic}>
-                  <div className="bar-row-head">
-                    <span>{entry.topic}</span>
-                    <strong>{entry.count}</strong>
-                  </div>
-                  <div className="bar-track">
+                <div style={{ display: "grid", gap: 8 }}>
+                  {pipelineStages.length === 0 ? (
                     <div
-                      className="bar-fill"
                       style={{
-                        width: `${Math.max(8, Math.min(100, (entry.count / maxTopicCount) * 100))}%`,
+                        padding: 14,
+                        borderRadius: 12,
+                        border: "1px dashed rgba(148,163,184,.35)",
+                        color: "#94a3b8",
                       }}
-                    />
-                  </div>
+                    >
+                      No pipeline stages received yet.
+                    </div>
+                  ) : (
+                    pipelineStages.map((stage) => (
+                      <div
+                        key={stage.stage}
+                        style={{
+                          display: "flex",
+                          alignItems: "flex-start",
+                          gap: 12,
+                          padding: 12,
+                          borderRadius: 12,
+                          border: "1px solid rgba(148,163,184,.18)",
+                          background: "rgba(15,23,42,.5)",
+                        }}
+                      >
+                        <div
+                          style={{
+                            minWidth: 86,
+                            display: "inline-flex",
+                            justifyContent: "center",
+                            alignItems: "center",
+                            padding: "4px 10px",
+                            borderRadius: 999,
+                            fontSize: 11,
+                            fontWeight: 700,
+                            textTransform: "uppercase",
+                            ...(stage.status === "complete"
+                              ? badgeStyles("live")
+                              : stage.status === "error" ||
+                                  stage.status === "failed"
+                                ? badgeStyles("error")
+                                : badgeStyles("idle")),
+                          }}
+                        >
+                          {stage.stage}
+                        </div>
+                        <div style={{ flex: 1 }}>
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              gap: 12,
+                              alignItems: "center",
+                            }}
+                          >
+                            <strong style={{ fontSize: 13 }}>
+                              {stage.status}
+                            </strong>
+                            <span style={{ fontSize: 11, color: "#94a3b8" }}>
+                              {formatTimestamp(stage.ts)}
+                            </span>
+                          </div>
+                          <div
+                            style={{
+                              marginTop: 4,
+                              fontSize: 13,
+                              lineHeight: 1.5,
+                              color: "#cbd5e1",
+                            }}
+                          >
+                            {stage.message}
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  )}
                 </div>
-              ))}
-            </div>
-          )}
-        </article>
+              </div>
 
-        <article className="panel-card">
-          <div className="panel-header panel-header--stacked">
-            <div>
-              <div className="queue-label">Sentiment mix</div>
-              <h2>Model output by sentiment</h2>
-            </div>
-          </div>
+              <div style={{ fontSize: 12, color: "#94a3b8" }}>
+                {backendReady
+                  ? "Backend connected. Events will stream live."
+                  : "Waiting for backend health check."}
+              </div>
+            </section>
 
-          {sentiment.length === 0 ? (
-            <div className="empty-state">No sentiment data available yet.</div>
-          ) : (
-            <div className="mini-list">
-              {sentiment.map((entry) => (
-                <div className="bar-row" key={entry.sentiment}>
-                  <div className="bar-row-head">
-                    <span>{entry.sentiment}</span>
-                    <strong>{entry.count}</strong>
+            <section>
+              <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 10 }}>
+                Live log feed
+              </div>
+              <div
+                ref={feedRef}
+                style={{
+                  height: 520,
+                  overflowY: "auto",
+                  borderRadius: 12,
+                  border: "1px solid rgba(148,163,184,.18)",
+                  background: "rgba(2,6,23,.35)",
+                }}
+              >
+                {recentLogs.length === 0 ? (
+                  <div style={{ padding: 18, color: "#94a3b8" }}>
+                    No events yet. Waiting for SSE stream…
                   </div>
-                  <div className="bar-track">
+                ) : (
+                  recentLogs.map((entry) => (
                     <div
-                      className="bar-fill bar-fill-alt"
+                      key={entry.id}
                       style={{
-                        width: `${Math.max(8, Math.min(100, (entry.count / maxSentimentCount) * 100))}%`,
+                        display: "flex",
+                        gap: 10,
+                        alignItems: "flex-start",
+                        padding: "12px 14px",
+                        borderBottom: "1px solid rgba(148,163,184,.12)",
                       }}
-                    />
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </article>
-      </section>
+                    >
+                      <div
+                        style={{
+                          width: 26,
+                          height: 26,
+                          borderRadius: 8,
+                          display: "grid",
+                          placeItems: "center",
+                          fontSize: 10,
+                          fontWeight: 800,
+                          color: "#fff",
+                          background:
+                            entry.type === "pipeline"
+                              ? "rgba(59,130,246,.35)"
+                              : entry.type === "scrape_progress"
+                                ? "rgba(34,197,94,.35)"
+                                : entry.type === "scoring"
+                                  ? "rgba(245,158,11,.35)"
+                                  : entry.type === "post_feedback"
+                                    ? "rgba(14,165,233,.35)"
+                                    : "rgba(148,163,184,.35)",
+                        }}
+                      >
+                        {getEventLabel(entry.type).slice(0, 2).toUpperCase()}
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            gap: 10,
+                            alignItems: "center",
+                          }}
+                        >
+                          <span
+                            style={{
+                              fontSize: 11,
+                              fontWeight: 700,
+                              letterSpacing: "0.04em",
+                              textTransform: "uppercase",
+                              color: "#93c5fd",
+                            }}
+                          >
+                            {getEventLabel(entry.type)}
+                          </span>
+                          <span style={{ fontSize: 11, color: "#94a3b8" }}>
+                            {formatTimestamp(entry.ts)}
+                          </span>
+                        </div>
+                        <div
+                          style={{
+                            marginTop: 4,
+                            fontSize: 13,
+                            lineHeight: 1.5,
+                            color: "#e2e8f0",
+                            wordBreak: "break-word",
+                          }}
+                        >
+                          {getEventSummary(entry)}
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
+          </div>
+        </Panel>
+      </div>
     </main>
   );
 }

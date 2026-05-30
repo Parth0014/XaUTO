@@ -1,11 +1,14 @@
+import asyncio
 import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Request
 from fastapi.responses import HTMLResponse
 
 from app.database import get_db_client, init_indexes
 from app.routes.analytics import router as analytics_router
+from app.routes.browser import router as browser_router
 from app.routes.embeddings import router as embeddings_router
 from app.routes.generator import router as generator_router
 from app.routes.maintenance import router as maintenance_router
@@ -15,8 +18,11 @@ from app.routes.retrieval import router as retrieval_router
 from app.routes.scraper import router as scraper_router
 from app.routes.scoring import router as scoring_router
 from app.routes.trends import router as trends_router
+from app.routes.events import router as events_router
+from app.services.event_broadcaster import make_event, publish_sync, set_event_loop
 from app.scheduler.jobs import start_scheduler
 from app.scheduler.jobs import stop_scheduler
+from app.services.vector_store_service import qdrant_health
 
 app = FastAPI()
 
@@ -32,8 +38,33 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def request_event_middleware(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith(("/analytics", "/scrape", "/pipeline", "/score", "/post", "/generate")):
+        try:
+            publish_sync(
+                make_event(
+                    "request",
+                    {
+                        "method": request.method,
+                        "path": path,
+                        "status_code": response.status_code,
+                    },
+                )
+            )
+        except Exception:
+            pass
+    return response
+
+
 @app.on_event("startup")
-def startup_event():
+async def startup_event():
+    try:
+        set_event_loop(asyncio.get_running_loop())
+    except RuntimeError:
+        set_event_loop(None)
     init_indexes(get_db_client())
     start_scheduler()
 
@@ -45,6 +76,7 @@ def shutdown_event():
 
 
 app.include_router(scraper_router)
+app.include_router(browser_router)
 app.include_router(analytics_router)
 app.include_router(embeddings_router)
 app.include_router(generator_router)
@@ -54,6 +86,7 @@ app.include_router(retrieval_router)
 app.include_router(maintenance_router)
 app.include_router(scoring_router)
 app.include_router(trends_router)
+app.include_router(events_router)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -141,5 +174,9 @@ def home():
 
 @app.get("/healthz")
 def health_check():
-
-    return {"status": "ok"}
+    qdrant = qdrant_health()
+    status = "ok" if qdrant.get("available") or not qdrant.get("configured") else "degraded"
+    return {
+        "status": status,
+        "qdrant": qdrant,
+    }

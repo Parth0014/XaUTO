@@ -1,6 +1,7 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi import Query, HTTPException
 
+from app.database import get_db
 from app.services.generator_service import (
     generate_tweet
 )
@@ -9,7 +10,7 @@ router = APIRouter()
 
 
 @router.get("/generate/{topic}")
-def generate(topic: str, count: int = Query(1, ge=1, le=11)):
+def generate(topic: str, count: int = Query(1, ge=1, le=11), db=Depends(get_db)):
 
     total = max(1, min(11, count))
     items = []
@@ -18,7 +19,7 @@ def generate(topic: str, count: int = Query(1, ge=1, le=11)):
 
     for _ in range(total):
         try:
-            post = generate_tweet(topic)
+            post = generate_tweet(db, topic)
         except HTTPException as exc:
             # If upstream model quota is exhausted or returns a rate-limit,
             # stop generating more items and return what we have so far

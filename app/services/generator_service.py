@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 from fastapi import HTTPException
 import httpx
 import logging
-from app.database import get_db_client
+from app.services.event_broadcaster import make_event, publish_sync
 from app.services.retrieval_service import retrieve_similar_posts
 from app.services.scoring_service import score_generated_post
 from app.services.text_cleaner import (
@@ -505,11 +505,12 @@ def _get_trend_pattern(db, topic: str) -> dict | None:
         sort=[("created_at", -1)],
     )
 
-    if not pattern or not pattern.pattern_json:
+    pattern_json = pattern.get("pattern_json") if pattern else None
+    if not pattern_json:
         return None
 
     try:
-        data = json.loads(pattern.pattern_json)
+        data = json.loads(pattern_json)
     except json.JSONDecodeError:
         return None
 
@@ -758,7 +759,47 @@ def _build_fallback(topic: str, reference_posts: list) -> str:
 # Main generation entry point
 # ---------------------------------------------------------------------------
 
-def generate_tweet(topic: str) -> dict:
+def _persist_generated_post(db, topic: str, generated_text: str) -> dict:
+    try:
+        publish_sync(make_event("pipeline", {"stage": "generate", "status": "start", "message": f"Generating draft for {topic}.", "topic": topic}))
+    except Exception:
+        pass
+
+    post = {
+        "topic": topic,
+        "generated_text": generated_text,
+        "status": "generated",
+        "predicted_score": 0.0,
+        "posted": False,
+        "actual_likes": 0,
+        "actual_views": 0,
+        "actual_reposts": 0,
+        "created_at": datetime.now(timezone.utc),
+    }
+
+    result = db.generated_posts.insert_one(post)
+    post["_id"] = result.inserted_id
+
+    try:
+        publish_sync(make_event("pipeline", {"stage": "db", "status": "complete", "message": "Generated draft inserted into generated_posts.", "post_id": str(post["_id"]), "topic": topic}))
+    except Exception:
+        pass
+
+    try:
+        breakdown = score_generated_post(db, post)
+        post["predicted_score"] = float(breakdown.get("score", 0.0))
+    except Exception as exc:
+        logging.getLogger("uvicorn.error").warning(f"[generator][score] failed: {exc}")
+
+    try:
+        publish_sync(make_event("pipeline", {"stage": "generate", "status": "complete", "message": f"Draft ready for {topic}.", "post_id": str(post["_id"]), "topic": topic}))
+    except Exception:
+        pass
+
+    return post
+
+
+def generate_tweet(db, topic: str) -> dict:
     if not GROQ_API_KEY or not GROQ_API_URL:
         raise HTTPException(
             status_code=503,
@@ -767,8 +808,6 @@ def generate_tweet(topic: str) -> dict:
                 "Add valid values to .env and restart the server."
             ),
         )
-
-    db = get_db_client()
 
     reference_posts = _get_reference_posts(db, topic)
     pattern_data = _get_trend_pattern(db, topic)
@@ -859,23 +898,4 @@ def generate_tweet(topic: str) -> dict:
         generated_text = _build_fallback(topic, reference_posts)
         print(f"[generator] Using fallback for topic={topic!r}: {generated_text!r}")
 
-        post = {
-            "topic": topic,
-            "generated_text": generated_text,
-            "status": "generated",
-            "predicted_score": 0.0,
-            "posted": False,
-            "actual_likes": 0,
-            "actual_views": 0,
-            "actual_reposts": 0,
-            "created_at": datetime.now(timezone.utc),
-        }
-        result = db.generated_posts.insert_one(post)
-        post["_id"] = result.inserted_id
-
-        try:
-            score_generated_post(db, post)
-        except Exception as exc:
-            logging.getLogger("uvicorn.error").warning(f"[generator][score] failed: {exc}")
-
-        return post
+    return _persist_generated_post(db, topic, generated_text)

@@ -4,15 +4,47 @@ import logging
 import os
 from typing import Iterable
 
-from qdrant_client import QdrantClient
-from qdrant_client.http import models as qdrant_models
+try:
+    from qdrant_client import QdrantClient
+    from qdrant_client.http import models as qdrant_models
+except ModuleNotFoundError:  # pragma: no cover - environment-specific fallback
+    QdrantClient = None
+    qdrant_models = None
 
 
 _COLLECTION = os.getenv("QDRANT_COLLECTION", "scraped_posts")
 logger = logging.getLogger("uvicorn.error")
 
 
+def qdrant_health() -> dict:
+    if QdrantClient is None:
+        return {
+            "available": False,
+            "configured": False,
+            "reason": "qdrant-client is not installed",
+        }
+
+    try:
+        client = _get_client()
+        client.get_collections()
+        return {
+            "available": True,
+            "configured": True,
+            "reason": None,
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "configured": True,
+            "reason": str(exc),
+        }
+
+
 def _get_client() -> QdrantClient:
+    if QdrantClient is None:
+        raise RuntimeError(
+            "qdrant-client is not installed. Install requirements.txt to enable vector store features."
+        )
     url = os.getenv("QDRANT_URL", "http://localhost:6333").strip()
     if not url:
         raise RuntimeError("QDRANT_URL is not configured")
@@ -24,6 +56,10 @@ def ensure_collection(vector_size: int) -> None:
     client = _get_client()
 
     try:
+        if qdrant_models is None:
+            raise RuntimeError(
+                "qdrant-client is not installed. Install requirements.txt to enable vector store features."
+            )
         info = client.get_collection(_COLLECTION)
         existing_size = info.config.params.vectors.size
         if existing_size != vector_size:
@@ -35,6 +71,10 @@ def ensure_collection(vector_size: int) -> None:
         logger.warning("Qdrant collection check failed: %s", exc)
 
     try:
+        if qdrant_models is None:
+            raise RuntimeError(
+                "qdrant-client is not installed. Install requirements.txt to enable vector store features."
+            )
         client.recreate_collection(
             collection_name=_COLLECTION,
             vectors_config=qdrant_models.VectorParams(
@@ -60,6 +100,10 @@ def upsert_embeddings(items: Iterable[dict]) -> None:
 
     points = []
     for item in items:
+        if qdrant_models is None:
+            raise RuntimeError(
+                "qdrant-client is not installed. Install requirements.txt to enable vector store features."
+            )
         point = qdrant_models.PointStruct(
             id=item["vector_id"],
             vector=item["vector"],
@@ -90,6 +134,10 @@ def retrieve_vector(vector_id: str):
 
 def search_vectors(query_vector: list[float], top_k: int, filters: dict | None = None):
     client = _get_client()
+    if qdrant_models is None:
+        raise RuntimeError(
+            "qdrant-client is not installed. Install requirements.txt to enable vector store features."
+        )
 
     must_conditions = []
 
@@ -147,6 +195,10 @@ def search_vectors(query_vector: list[float], top_k: int, filters: dict | None =
 
 def scroll_vectors(filters: dict | None = None, limit: int = 1000):
     client = _get_client()
+    if qdrant_models is None:
+        raise RuntimeError(
+            "qdrant-client is not installed. Install requirements.txt to enable vector store features."
+        )
 
     must_conditions = []
 

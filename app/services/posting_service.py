@@ -184,13 +184,13 @@ def _is_too_similar(db, text: str, threshold: float = 0.9) -> bool:
     return False
 
 
-def _select_candidate(db) -> dict | None:
+def _select_candidate(db, statuses: list[str]) -> dict | None:
     min_score = _min_score()
 
     candidates = list(
         db.generated_posts
         .find({
-            "status": "generated",
+            "status": {"$in": statuses},
             "$or": [{"posted": False}, {"posted": {"$exists": False}}],
             "predicted_score": {"$gte": min_score},
         })
@@ -238,9 +238,12 @@ def _post_via_x_api(text: str) -> dict[str, Any]:
         return resp.json()
 
 
-def run_posting_cycle(db) -> dict[str, Any]:
-    if not _autopost_enabled():
+def run_posting_cycle(db, allow_manual: bool = False, require_approval: bool | None = None) -> dict[str, Any]:
+    if not _autopost_enabled() and not allow_manual:
         return {"posted": 0, "reason": "autopost_disabled"}
+
+    if require_approval is None:
+        require_approval = not _autopost_enabled()
 
     ok, reason = _within_rate_limits(db)
     if not ok:
@@ -250,8 +253,10 @@ def run_posting_cycle(db) -> dict[str, Any]:
     posted = []
     failed = []
 
+    statuses = ["approved"] if require_approval else ["generated", "approved"]
+
     for _ in range(max_posts):
-        candidate = _select_candidate(db)
+        candidate = _select_candidate(db, statuses)
         if not candidate:
             break
 

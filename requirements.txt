@@ -11,3 +11,5 @@ numpy
 scikit-learn
 sentence-transformers
 qdrant-client
+transformers
+torch

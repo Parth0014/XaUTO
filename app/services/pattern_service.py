@@ -60,7 +60,7 @@ def build_patterns_for_cluster(db, cluster_id: str, top_n: int = 20) -> dict | N
     post_ids = [item.get("scraped_post_id") for item in items if item.get("scraped_post_id")]
     posts = list(db.scraped_posts.find({"_id": {"$in": post_ids}}))
 
-    texts = [post.content for post in posts if post.content]
+    texts = [post.get("content") for post in posts if post.get("content")]
     if not texts:
         return None
 

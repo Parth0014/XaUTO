@@ -2,13 +2,11 @@ import os
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from app.scraper.x_scraper import scrape_x_trends
 from app.database import get_db_client
-from app.services.embedding_pipeline import backfill_embeddings
 from app.services.cleanup_service import run_cleanup
-from app.services.posting_service import run_posting_cycle
+from app.services.pipeline_service import run_full_pipeline
 from app.services.trend_service import run_trend_pipeline
-from app.services.scoring_service import score_unscored_posts
+from app.services.post_feedback import fetch_post_metrics
 
 scheduler = BackgroundScheduler()
 
@@ -32,39 +30,34 @@ def start_scheduler():
         )
 
         scheduler.add_job(
-            scrape_x_trends,
+            _run_full_pipeline,
             "interval",
-            minutes=scrape_interval_minutes
-        )
-
-        scheduler.add_job(
-            _run_embedding_backfill,
-            "interval",
-            minutes=20
+            minutes=scrape_interval_minutes,
+            max_instances=1,
+            coalesce=True,
         )
 
         scheduler.add_job(
             _run_trend_pipeline,
             "interval",
-            minutes=60
-        )
-
-        scheduler.add_job(
-            _run_scoring_pipeline,
-            "interval",
-            minutes=10
-        )
-
-        scheduler.add_job(
-            _run_posting_pipeline,
-            "interval",
-            minutes=15
+            minutes=60,
+            max_instances=1,
+            coalesce=True,
         )
 
         scheduler.add_job(
             _run_cleanup,
             "interval",
-            hours=6
+            hours=6,
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            _run_post_feedback,
+            "interval",
+            minutes=30,
+            max_instances=1,
+            coalesce=True,
         )
 
     scheduler.start()
@@ -76,24 +69,19 @@ def stop_scheduler():
         scheduler.shutdown(wait=False)
 
 
-def _run_embedding_backfill():
-    db = get_db_client()
-    backfill_embeddings(db, limit=200)
-
-
 def _run_trend_pipeline():
     db = get_db_client()
     run_trend_pipeline(db, window_hours=6, min_posts=25)
 
 
-def _run_scoring_pipeline():
+def _run_full_pipeline():
     db = get_db_client()
-    score_unscored_posts(db, limit=50)
+    run_full_pipeline(db, embed_inline=False, allow_manual_posting=False)
 
 
-def _run_posting_pipeline():
+def _run_post_feedback():
     db = get_db_client()
-    run_posting_cycle(db)
+    fetch_post_metrics(db, limit=200)
 
 
 def _run_cleanup():

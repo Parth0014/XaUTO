@@ -54,14 +54,14 @@ def run_trend_pipeline(
         if not posts:
             continue
 
-        avg_likes = np.mean([post.likes or 0 for post in posts])
-        avg_reposts = np.mean([post.reposts or 0 for post in posts])
-        avg_replies = np.mean([post.replies or 0 for post in posts])
+        avg_likes = np.mean([post.get("likes") or 0 for post in posts])
+        avg_reposts = np.mean([post.get("reposts") or 0 for post in posts])
+        avg_replies = np.mean([post.get("replies") or 0 for post in posts])
 
         velocity_score = (avg_likes + avg_reposts + avg_replies) / max(1, window_hours)
 
         cluster_doc = {
-            "topic": posts[0].get("topic"),
+            "topic": posts[0].get("topic") if isinstance(posts[0], dict) else getattr(posts[0], "topic", None),
             "window_start": window_start,
             "window_end": window_end,
             "size": len(posts),

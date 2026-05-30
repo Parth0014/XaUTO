@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from threading import Lock
+from app.services.event_broadcaster import publish_sync, make_event
 
 
 _lock = Lock()
@@ -63,6 +64,10 @@ def update_scrape_progress(**kwargs):
     with _lock:
         _state.update(kwargs)
         _stamp_state()
+        try:
+            publish_sync(make_event("scrape_progress", dict(_state)))
+        except Exception:
+            pass
 
 
 def finish_scrape_progress(message: str = "Scraping finished."):
@@ -82,6 +87,10 @@ def fail_scrape_progress(error_message: str):
             "last_error": error_message,
         })
         _stamp_state()
+        try:
+            publish_sync(make_event("scrape_progress", dict(_state)))
+        except Exception:
+            pass
 
 
 def get_scrape_progress():

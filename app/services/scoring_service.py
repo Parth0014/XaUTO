@@ -6,6 +6,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.services.text_cleaner import sanitize_reference_text
+from app.services.reward_service import combined_reward_score
+from app.services.groq_client import call_groq
+from app.services.event_broadcaster import publish_sync, make_event
 
 _URL_RE = re.compile(r"https?://\S+|\bx\.com/\S+", re.IGNORECASE)
 _HASHTAG_RE = re.compile(r"#\w+")
@@ -122,12 +125,29 @@ def score_generated_post(db, post: dict) -> dict[str, Any]:
     trend_boost = _trend_boost(db, post.get("topic"))
     breakdown = score_text(post.get("generated_text") or "", trend_boost=trend_boost)
 
+    # Compute reward-model score (semantic + optional groq second-opinion)
+    try:
+        reward_score = combined_reward_score(db, post.get("generated_text") or "", groq_callable=call_groq)
+    except Exception:
+        reward_score = 0.0
+
+    # Combine heuristic breakdown score and reward model: give reward model higher weight
+    base_score = float(breakdown.get("score", 0.0))
+    combined = round(max(0.0, min(100.0, (0.4 * base_score) + (0.6 * reward_score))), 2)
+
     db.generated_posts.update_one(
         {"_id": post.get("_id")},
-        {"$set": {"predicted_score": float(breakdown["score"])}}
+        {"$set": {"predicted_score": float(combined), "reward_score": float(reward_score)}}
     )
 
+    try:
+        publish_sync(make_event("scoring", {"post_id": str(post.get("_id")), "predicted_score": float(combined), "reward_score": float(reward_score)}))
+    except Exception:
+        pass
+
     breakdown["post_id"] = str(post.get("_id"))
+    breakdown["reward_score"] = float(reward_score)
+    breakdown["combined_score"] = float(combined)
     return breakdown
 
 

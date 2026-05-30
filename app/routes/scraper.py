@@ -16,6 +16,13 @@ router = APIRouter()
 
 @router.get("/scrape/x")
 def scrape_x():
+    current = get_scrape_progress()
+    if current.get("state") == "running":
+        return {
+            "status": "skipped",
+            "message": "Scraper is already running.",
+        }
+
     start_scrape_progress("X API scrape started.")
 
     def run_scraper():
