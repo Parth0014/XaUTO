@@ -1,7 +1,0 @@
-client id : ZmlqbTlGeUkzaW9qOG9IUVdGX2o6MTpjaQ
-client secret : nuoUlDM75Kp_IjW-3THvywXYLI463iy-eLI2DpUV3fgLneu3s_
-access token : 2058138669287190528-AsemT5K4rnblDtcjjrYZnAxNyLBsxe
-access token secret : dHrHGF2Hbry6oGMEgIfWQlpsujQpxeh6gKpqmzOpQHX9N
-consumer key : 3dOFcvXTLU3AeNsqhWI3kqHOs
-consumer key secret : 2CxXybkh1pX3cM4CFSJ9TpwzNpxFbTDMs7jIdxTUQYnUoFQiqq
-bearer token : AAAAAAAAAAAAAAAAAAAAAJaI9wEAAAAAzF1fQ8vjvbC4zj%2BrMZ8r4AJRr2c%3DsPNcKyFA1PfDXwXep2du45oemUiXpV0b0cc0bIFS2bBzDUWsLe
